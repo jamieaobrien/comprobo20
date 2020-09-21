@@ -8,8 +8,10 @@ import termios
 import numpy as np
 from geometry_msgs.msg import Twist, Pose2D
 from nav_msgs.msg import Odometry
+from sensor_msgs.msg import LaserScan
 
-class DriveSquare(object):
+
+class WallFollow(object):
     def __init__(self):
         # sys
         self.settings_ = termios.tcgetattr(sys.stdin)
@@ -21,7 +23,7 @@ class DriveSquare(object):
 
         # Initialize subscriber and publisher
         self.odom_sub = rospy.Subscriber("odom",Odometry,self.callback)
-        #self.tf_sub = rospy.Subscriber("tf",tf2,self.tf_cb)
+        self.scan_sub = rospy.Subscriber("scan",LaserScan,self.scan_cb)
         self.cmd_vel_pub = rospy.Publisher("cmd_vel", Twist, queue_size = 1)
         
         # ROS parameters
@@ -35,41 +37,42 @@ class DriveSquare(object):
         self.th0 = self.pose.theta
         self.lin_speed = 1.0
         self.ang_speed = 1.0
-
-        # Spin to keep python from exiting until the node is stopped
-        #rospy.spin()
+        self.turn_ang = 0.0
 
     def callback(self,data):
         self.pose.x = data.pose.pose.position.x
         self.pose.y = data.pose.pose.position.y
         self.pose.theta = 2.0 * np.arctan2(data.pose.pose.orientation.z, data.pose.pose.orientation.w)
                
+    def scan_cb(self,data):
+        self.ranges = np.array(data.ranges)
+        angles = np.where(self.ranges < 2.0)[0]
+        min_ang = angles[0]
+        max_ang = angles[0]
+        for i in range(1,len(angles)):
+            if angles[i] - angles[i-1] < 30:
+                max_ang = angles[i]
+            else:
+                walls.append([min_ang,max_ang])
+                min_ang = angles[i+1]
+
+
+        self.turn_ang = 0.0
+        self.speed_scale = min(np.mean(self.ranges[160:200]),1)
+
 
     def run(self):
+        cmd_vel = Twist()
         try:
             while not rospy.is_shutdown():
-                cmd_vel = Twist()
-                #if math.sqrt((self.pose.x-self.pose0.x)**2 + (self.pose.y-self.pose0.y)**2) < 1.0:
-                if math.sqrt((self.pose.x-self.x0)**2 + (self.pose.y-self.y0)**2) < 0.99:
-                    #print(math.sqrt((self.pose.x-self.x0)**2 + (self.pose.y-self.y0)**2))
-                    #print(self.pose,self.pose0)
-                    cmd_vel.linear.x = self.lin_speed * self.x_scale * (1- math.sqrt((self.pose.x-self.x0)**2 + (self.pose.y-self.y0)**2))
-                    cmd_vel.angular.z = 0.0
-                    self.cmd_vel_pub.publish(cmd_vel)  
-                    #print("go forward")
-                elif abs((self.th0) - (self.pose.theta)) % 1.57 < 1.569 or (self.pose.theta > 6.0 and self.th0 < -6.0):
-                    print(self.pose.theta,self.th0,abs((self.th0) - (self.pose.theta)) % 1.57)
+                if abs((self.th0) - (self.pose.theta)) % (self.turn_ang) < self.turn_ang - 0.001:
+                    print(self.pose.theta,self.th0,abs((self.th0) - (self.pose.theta)) % self.turn_ang)
                     cmd_vel.linear.x = 0.0
-                    cmd_vel.angular.z = self.ang_speed * self.z_scale * abs(1.57-abs(self.pose.theta-self.th0)%1.57)
+                    cmd_vel.angular.z = self.ang_speed * self.z_scale * (self.pose.theta-self.th0)
                     self.cmd_vel_pub.publish(cmd_vel)  
-                    print("turn")   
+                    print("turn")
                 else:
-                    self.x0 = self.pose.x
-                    self.y0 = self.pose.y
-                    self.th0 = self.pose.theta 
-                    if self.th0 > 6.0:
-                        self.th0 = -1*self.th0
-                    cmd_vel.linear.x = cmd_vel.angular.z = 0.0
+                    cmd_vel.linear.x = self.lin_speed * self.x_scale * self.speed_scale
                     self.cmd_vel_pub.publish(cmd_vel)
         except Exception as e:
             rospy.loginfo('{}'.format(e))
@@ -80,5 +83,5 @@ class DriveSquare(object):
 
 
 if __name__=="__main__":
-    drive_square = DriveSquare()
-    drive_square.run()
+    wall_follow = WallFollow()
+    wall_follow.run()
