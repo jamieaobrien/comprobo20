@@ -1,87 +1,104 @@
 #!/usr/bin/env python
 
-import rospy
-import math
-import threading
-import sys
-import termios
-import numpy as np
-from geometry_msgs.msg import Twist, Pose2D
-from nav_msgs.msg import Odometry
+from geometry_msgs.msg import Twist, Vector3, Pose, Point
 from sensor_msgs.msg import LaserScan
-
+from neato_node.msg import Bump
+from visualization_msgs.msg import Marker
+from nav_msgs.msg import Odometry
+import rospy
+from math import sin, cos, pi
+from tf.transformations import euler_from_quaternion
 
 class WallFollow(object):
     def __init__(self):
-        # sys
-        self.settings_ = termios.tcgetattr(sys.stdin)
+        # init node
+        rospy.init_node ('wall_follow_node')
+        # init cmd_vel publisher
+        self.cmd_vel_pub = rospy.Publisher('cmd_vel', Twist, queue_size=10)
+        self.rate = rospy.Rate(10)
+        # init subscribers
+        self.scan_sub = rospy.Subscriber("/stable_scan", LaserScan, self.scan_cb)
+        self.odom_sub = rospy.Subscriber("/odom", Odometry, self.odom_cb)
+        # init cmd_vel
+        self.cmd_vel = Twist(linear=Vector3(x=0),angular=Vector3(z=0))
+        self.cmd_vel.linear.x = 0.0
+        self.cmd_vel.angular.z = 0.0
 
-        # initialize node
-        rospy.init_node("drive_square")
-        
-        self.pose = Pose2D()
+        # set up rviz marker for wall
 
-        # Initialize subscriber and publisher
-        self.odom_sub = rospy.Subscriber("odom",Odometry,self.callback)
-        self.scan_sub = rospy.Subscriber("scan",LaserScan,self.scan_cb)
-        self.cmd_vel_pub = rospy.Publisher("cmd_vel", Twist, queue_size = 1)
-        
-        # ROS parameters
-        self.x_scale = rospy.get_param('~v_scale',1.0)
-        self.z_scale = rospy.get_param('~z_scale',1.0)
+        self.position = Vector3(x=0,y=0,z=0) # z is yaw
+        self.marker = Marker(scale = Vector3(x = 0.05, y = 0.05, z = 1.0))
+        self.marker.color.a = 0.5
+        self.marker.color.r = 1
+        self.marker.header.frame_id = "odom"
+        self.marker.type = Marker.POINTS
+        self.marker_pub = rospy.Publisher('wall_marker',Marker,queue_size=10)
 
-        # Class params
-       
-        self.x0 = self.pose.x
-        self.y0 = self.pose.y 
-        self.th0 = self.pose.theta
-        self.lin_speed = 1.0
-        self.ang_speed = 1.0
-        self.turn_ang = 0.0
 
-    def callback(self,data):
-        self.pose.x = data.pose.pose.position.x
-        self.pose.y = data.pose.pose.position.y
-        self.pose.theta = 2.0 * np.arctan2(data.pose.pose.orientation.z, data.pose.pose.orientation.w)
-               
+        # set params
+        self.wall_distance = 1.0 # Stay about 1 meter from wall
+        self.ang_speed = 0.5
+        self.lin_speed = 0.1 # default linear speed
+        self.wall = False # True if a wall is visible
+        self.direction = 1
+        self.window = 45 # side scan window
+        self.scan = [] # holds LaserScan
+        self.kp = 0.2 # Proportional controller constant
+        self.error = 0 # controller error
+
+    def odom_cb(self,data):
+
+        yaw = euler_from_quaternion((data.pose.pose.orientation.x,data.pose.pose.orientation.y,data.pose.pose.orientation.z,data.pose.pose.orientation.w))
+        self.position.x = data.pose.pose.position.x
+        self.position.y = data.pose.pose.position.y
+        self.position.z = yaw
+
     def scan_cb(self,data):
-        self.ranges = np.array(data.ranges)
-        angles = np.where(self.ranges < 2.0)[0]
-        min_ang = angles[0]
-        max_ang = angles[0]
-        for i in range(1,len(angles)):
-            if angles[i] - angles[i-1] < 30:
-                max_ang = angles[i]
-            else:
-                walls.append([min_ang,max_ang])
-                min_ang = angles[i+1]
 
+        self.wall = False
+        self.scan = []
 
-        self.turn_ang = 0.0
-        self.speed_scale = min(np.mean(self.ranges[160:200]),1)
+        angle_range = list(range(0,self.window)) + list(range(360 - self.window, 360))
+        for angle in angle_range:
+            distance = data.ranges[angle]
+            if distance == 0.0:
+                continue
+            if distance < 2*self.wall_distance:
+                self.wall = True
+                if angle <= self.window:
+                    self.scan.append([distance, angle*pi/180])
+                else:
+                    self.scan.append([distance, (angle-360)*pi/180])
 
+        if self.wall:
+            self.scan.sort(key=lambda item: item[0])
+            self.error = self.wall_distance - self.scan[0][0]
+            self.wall_marker()
+
+    def wall_marker(self):
+
+        self.marker.header.stamp = rospy.Time.now()
+        x = self.scan[0][0]*cos(self.scan[0][1])
+        y = self.scan[0][0]*sin(self.scan[0][1])
+        point = Point(x,y,0)
+        self.marker.points.append(point)
 
     def run(self):
-        cmd_vel = Twist()
-        try:
-            while not rospy.is_shutdown():
-                if abs((self.th0) - (self.pose.theta)) % (self.turn_ang) < self.turn_ang - 0.001:
-                    print(self.pose.theta,self.th0,abs((self.th0) - (self.pose.theta)) % self.turn_ang)
-                    cmd_vel.linear.x = 0.0
-                    cmd_vel.angular.z = self.ang_speed * self.z_scale * (self.pose.theta-self.th0)
-                    self.cmd_vel_pub.publish(cmd_vel)  
-                    print("turn")
+        while not rospy.is_shutdown():
+            if self.wall:
+                if self.scan[0][1] < 0.0:
+                    self.direction = 1
                 else:
-                    cmd_vel.linear.x = self.lin_speed * self.x_scale * self.speed_scale
-                    self.cmd_vel_pub.publish(cmd_vel)
-        except Exception as e:
-            rospy.loginfo('{}'.format(e))
-        finally:
-            cmd_vel.linear.x = cmd_vel.linear.z = 0.0
-            self.cmd_vel_pub.publish(cmd_vel)
-            termios.tcsetattr(sys.stdin, termios.TCSADRAIN, self.settings_)
+                    self.direction = -1
 
+                self.cmd_vel.angular.z = self.direction*self.kp*self.error
+            else:
+                self.cmd_vel.linear.x = self.lin_speed
+                self.cmd_vel.angular.z = 0.0
+            self.cmd_vel_pub.publish(self.cmd_vel)
+            self.marker_pub.publish(self.marker)
+            self.rate.sleep()
 
-if __name__=="__main__":
+if __name__=='__main__':
     wall_follow = WallFollow()
     wall_follow.run()
